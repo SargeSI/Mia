@@ -1,0 +1,33 @@
+{
+  "postgresql": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "hermes_recall",
+    "user": "mia",
+    "password": "1qa2ws-3ed",
+    "table": "recall_sessions"
+  },
+  "ollama": {
+    "url": "http://192.168.51.17:11434/api/embeddings",
+    "model": "qwen3-embedding:0.6b"
+  },
+  "thresholds": {
+    "auto_switch": 0.7,
+    "clarify_low": 0.5,
+    "clarify_high": 0.7,
+    "adaptive_high_sessions": 0.85,
+    "adaptive_session_count": 50,
+    "manual_switch_window_seconds": 300,
+    "hot_search": 0.5,
+    "warm_search": 0.6
+  },
+  "chunking": {
+    "llm_model": "deepseek-v4-flash",
+    "max_age_hours": 6,
+    "max_clusters_per_session": 20,
+    "boundary_threshold": 0.5,
+    "min_cluster_size": 3,
+    "max_cluster_size": 50
+  },
+  "vector_dimension": 1024
+}

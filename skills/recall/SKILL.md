@@ -1,0 +1,395 @@
+---
+name: recall
+description: Кросс-сессионный контекстный recall — автоматический поиск и переключение между сессиями через pgvector
+version: 1.0.0
+author: Mia & Sergey
+---
+
+# Recall — кросс-сессионный контекстный движок
+
+Ты (Hermes LLM) используешь этот скилл, чтобы находить релевантные прошлые сессии, создавать новые и сливать дублирующиеся. Скилл работает через инструменты в `tools/*.py`.
+
+## Архитектура: L1 vs L2
+
+- **L1** — текущая сессия. Она **уже в контекстном окне** агента, её не надо искать. Размер L1 (сколько истории попадает в промпт) определяется конфигурацией Hermes (`max_input_tokens`, стратегия truncation), а не агентом. Агент не может и не должен обещать конкретный размер L1 — это системный параметр.
+- **L2** — архивные сессии в pgvector. Только их мы ищем через `search_sessions.py` (текущая сессия фильтруется через `--current-session`).
+
+## Когда вызывать
+
+### На каждое сообщение пользователя (кроме первого в сессии)
+
+1. Вызови `tools/search_sessions.py` с текстом сообщения пользователя и `--current-session $SESSION_ID` — ищем **только L2** (архив), текущая сессия исключена из результатов
+2. Проанализируй результат:
+
+| similarity | Действие |
+|---|---|
+| > 0.7 | Автоматически переключись на найденную сессию. Сообщи пользователю: «Переключилась на тему [topic]» |
+| 0.5 – 0.7 | Покажи пользователю топ-3 кандидатов. Спроси: «Ты про [topic1], [topic2] или это новая тема?» |
+| < 0.5 | Продолжи в текущей сессии без переключения |
+| Пустой результат | Холодный старт или новая тема — продолжай в текущей сессии |
+
+3. После ответа пользователю вызови `tools/update_embedding.py --session-id $SESSION_ID --text "текст ответа"` (скользящее среднее обновляет вектор сессии)
+
+### При создании новой сессии
+
+Сразу после создания вызови `tools/save_session.py --session-id $SESSION_ID --topic "тема" --text "первое сообщение пользователя"`
+
+Тему определяй из первого сообщения: «Пирог», «Форки агентов», «Самокат» — кратко, 1-5 слов.
+
+### Ручные команды (приоритет над поиском)
+
+| Команда пользователя | Действие |
+|---|---|
+| «Новая тема: X» / «Новая тема X» | Создать новую сессию с темой X. Вызвать `save_session.py`. |
+| «Переключись на X» / «Вернись к X» | Найти сессию X через `list_sessions.py` и переключиться. Вызвать `register_manual_switch`. |
+| «Слей с X» / «Объедини с X» | Soft merge: `merge_sessions.py --from-sid $CURRENT --to-sid X_SID`. |
+
+### Периодически (раз в 10 сообщений)
+
+Вызови `tools/list_sessions.py` — актуализируй список активных тем для ручного управления.
+
+## Как вызывать инструменты
+
+Все скрипты лежат в `/home/mia/.hermes/skills/recall/tools/`. Запуск:
+
+```
+/home/mia/.hermes/hermes-agent/venv/bin/python3 /home/mia/.hermes/skills/recall/tools/search_sessions.py "текст запроса" --threshold 0.5 --current-session $SESSION_ID
+```
+
+Каждый скрипт возвращает JSON. Читай stdout.
+
+### Доступные инструменты
+
+| Скрипт | Аргументы | Возвращает |
+|---|---|---|
+| `search_sessions.py` | `"query"` `--threshold` `--current-session` | `[{session_id, topic, similarity, message_count}, ...]` |
+| `save_session.py` | `--session-id` `--topic` `--text` | `{status: "saved"}` |
+| `update_embedding.py` | `--session-id` `--text` | `{status: "updated", message_count}` |
+| `merge_sessions.py` | `--from-sid` `--to-sid` | `{status: "merged"}` |
+| `list_sessions.py` | (нет) | `[{session_id, topic, message_count, updated_at}, ...]` |
+
+## Трёхуровневая модель памяти по давности
+
+При поиске через pgvector учитывай давность сессии (поле `updated_at`):
+
+| Уровень | Давность | pgvector-фильтр | Стратегия |
+|---|---|---|---|
+| 🔥 Горячие | ≤ 10 дней | Без фильтра — все сессии за 10 дней попадают в поиск | Полный векторный поиск |
+| 🌡 Тёплые | 10–30 дней | `WHERE updated_at > NOW() - INTERVAL '30 days'` | Векторный поиск с фильтром по дате |
+| ❄️ Холодные | > 30 дней | Исключены из pgvector | Только LightRAG: summary-based + keyword search |
+
+**Важно:** порог горячих — **10 дней** (не 3). Тёплые начинаются с 10-го дня, не с 3-го. Холодные (>30 дней) исключены из векторного поиска — для них только LightRAG.
+
+## Пороги и конфигурация
+
+Параметры в `/home/mia/.hermes/skills/recall/recall_config.json`:
+
+- `auto_switch`: 0.7 — порог автоматического переключения
+- `clarify_low`: 0.5 — нижняя граница зоны уточнения
+- `clarify_high`: 0.7 — верхняя граница зоны уточнения
+- `manual_switch_window_seconds`: 300 — 5 минут не искать другую сессию после ручного переключения
+
+## Edge cases
+
+- **Холодный старт** (0 сессий): `search_sessions.py` вернёт `[]`. Создать новую сессию через `save_session.py`.
+- **Путаница тем**: similarity 0.5-0.7 — всегда уточнять, не переключаться молча.
+- **Слияние**: если на 3-5 сообщении понятно, что новая сессия — продолжение старой (sim > 0.7), предложить: «Похоже, это продолжение темы [старая]. Объединить?»
+  - При подтверждении: вызвать `merge_sessions.py --from-sid $CURRENT --to-sid $OLD_SID`
+  - Сообщить: «Контекст переключён на [старая]. Продолжай.»
+  - Сообщения НЕ переносятся физически, но recall всегда будет переключаться на старую сессию.
+
+## Запреты
+
+- НЕ переключать сессию без уведомления при sim 0.5-0.7
+- НЕ сливать сессии без подтверждения пользователя
+- НЕ создавать новую сессию при sim > 0.5 без уточнения
+- **НЕ обновлять embedding синхронно перед ответом пользователю** — задержка 200-500 мс на каждом сообщении неприемлема. Всегда фон: `terminal(background=True)` или cron.
+
+## Результаты тестирования
+
+Боевое тестирование 29 мая 2026 с тремя сессиями (Born_Mia про reasoning, E39 про BMW, Кулинария):
+
+| Запрос | Ожидание | Реальность | sim | Вердикт |
+|---|---|---|---|---|
+| «люфт в рулевом на E39» | BMW | BMW | 0.67 | ✅ |
+| «thinking mode deepseek» | Born_Mia | Born_Mia | 0.83 | ✅ |
+| «ванос е39» | BMW | **Кулинария** (0.55), Born_Mia (0.51), BMW (0.43) | — | ❌ False negative + false positive |
+| Скользящее среднее | — | 0.67 → 0.63 при смене формулировки | — | Стабильно |
+
+### Pitfall: качество embedding зависит от исходного текста
+
+Embedding BMW-сессии был создан по тексту «BMW E39: диагностика рулевого». Когда запрос «ванос е39» — модель qwen3-embedding не находит связи между «ванос» и «рулевое», потому что в исходном embedding'е нет семантики VANOS. Результат: sim 0.43 (ниже порога), сессия не найдена.
+
+**Решение:** после обнаружения нового контента в Obsidian/LightRAG по теме сессии — обновить embedding через `update_embedding.py`, передав расширенный текст (включая содержимое найденных заметок).
+
+Подробные данные: `references/testing-results-20260529.md`, `references/testing-vanos-20260529.md`, `references/chunker-performance-20260529.md`
+
+### Pitfall: агент не контролирует размер L1 (контекстного окна)
+
+Запросы вроде «сделай L1 размером 50-100 сообщений» адресованы не агенту, а **системе Hermes**. Агент (LLM) видит только то, что gateway уже включил в промпт. Размер истории определяется:
+- `max_input_tokens` в конфиге модели
+- Стратегией truncation (как gateway обрезает историю перед отправкой провайдеру)
+- Настройками конкретного провайдера
+
+**Что может агент:** искать релевантные сессии через pgvector, загружать из них нужные фрагменты через `session_search`, рекомендовать конфигурацию.
+**Что не может агент:** гарантировать, что в промпт попадёт ровно N сообщений истории.
+
+## Кластерная архитектура (v2, реализована 29.05.2026)
+
+Single-vector на всю сессию — НЕРАБОЧЕЕ решение. Если в сессии 200 сообщений про рулевую рейку и одно про VANOS — VANOS утонет в скользящем среднем (sim 0.43, ниже порога). Решение: **кластеры подтем**.
+
+### Как работает
+
+Вместо одного embedding на сессию — множество embedding'ов (по одному на каждую подтему):
+
+```
+Сессия BMW E39 (200 сообщений)
+    │
+    ▼ chun_session.py (чанкер)
+    │
+    ├── Кластер 1: «Диагностика рулевой рейки» (45 сообщений) → embedding₁
+    ├── Кластер 2: «VANOS: стук, адаптеры, масло 10W-60» (30 сообщений) → embedding₂
+    ├── Кластер 3: «Задние тормоза E60» (25 сообщений) → embedding₃
+    └── ...
+```
+
+При поиске «ванос е39» — embedding₂ найдётся с высоким sim, потому что он сделан ТОЛЬКО из сообщений про VANOS.
+
+### Таблица session_clusters
+
+В PostgreSQL `hermes_recall` создана таблица `session_clusters`:
+- `session_id`, `cluster_title`, `cluster_summary`
+- `message_range_start/end` — ссылки на сырые сообщения
+- `embedding vector(1024)`, `created_at`, `updated_at`
+- Индекс IVFFlat (cosine) + `(session_id, updated_at)`
+
+Старая `recall_sessions` сохранена, не дропнута.
+
+### Двухпроходный hot/warm поиск
+
+Реализован в `_recall_route()` (gateway/run.py):
+
+```
+embed(query)
+    │
+    ├─ HOT search:  max_age_days=10, threshold=0.5 → если нашлось → return
+    └─ WARM search: max_age_days=30, threshold=0.6 → фильтр age>10 → если нашлось → return [WARM]
+```
+
+Hot ищется ВСЕГДА при каждом сообщении. Warm — только fallback при пустом hot.
+
+### Чанкер (chunk_session.py) — ГИБРИДНЫЙ (embedding + DeepSeek)
+
+Реализован 29.05.2026 близняшкой. Два этапа:
+
+**Этап 1 — границы кластеров (qwen3-embedding, бесплатно):**
+```python
+embeddings = embedder.batch_embed(texts)  # /api/embed, по 20 за раз
+for i in range(len(embeddings)-1):
+    dist = 1 - cosine_sim(embeddings[i], embeddings[i+1])
+    if dist > boundary_threshold:  # смена темы
+        граница_кластера()
+```
+
+**Этап 2 — title + summary (DeepSeek v4-flash, платно, редко):**
+```
+Для каждого кластера — лёгкий запрос (~200 токенов входа, ~100 выхода):
+"Give a SHORT title and summary for this dialogue fragment. JSON."
+```
+2000 токенов на 10 кластеров (vs 64000 одним запросом в старой LLM-версии).
+
+**Конфигурация чанкинга** (в `recall_config.json`):
+```json
+"chunking": {
+    "boundary_threshold": 0.5,
+    "min_cluster_size": 3,
+    "max_cluster_size": 50,
+    "max_clusters_per_session": 20,
+    "llm_model": "deepseek-v4-flash"
+}
+```
+
+### Инкрементальный чанкер (v2, реализован 29.05.2026 22:15+)
+
+Batch-чанкер (выше) требует загружать ВСЮ историю сессии разом при `/new` — на 525 сообщениях это убивает Ollama. Решение: **инкрементальный чанкер с очередью**.
+
+**Принцип работы:**
+```
+Каждое сообщение → _feed_chunk_queue(sid, text)
+    ↓
+Очередь накопила 10 текстов? → daemon-поток
+    ↓
+batch_embed(10) → cosine distance до centroid'ов существующих кластеров сессии
+    ├─ dist < BOUNDARY_THRESHOLD → merge: centroid = 0.8×old + 0.2×new
+    └─ dist ≥ BOUNDARY_THRESHOLD → новый кластер
+```
+
+**Константы:**
+- `CHUNK_BATCH_SIZE = 10` (в gateway/run.py) — **заменён на single-message** после round3 (оставлен для истории)
+- `BOUNDARY_THRESHOLD = 0.5`
+- Rolling average = **0.8/0.2** (не 0.9/0.1 — более отзывчивое)
+- Ollama timeout: **30s**
+
+**Архитектура round3 (реализована 30.05.2026 01:56):** single-message очередь + daemon-воркер. Реализовано близняшкой (`handoff_20260530_single_msg.md`). Заменяет batch=10:
+
+```
+_feed_chunk_queue(sid, text, msg_index) → deque.append()
+_start_chunk_worker() — daemon-поток, запускается один раз
+    ↓ pop-left → _bg_chunk_single(sid, text, msg_index)
+    ↓ sleep(0.15) — пауза между элементами
+chunk_session.py --single --text "..." --msg-index N
+    ↓ batch_embed([text]) → centroid matching
+    ↓ merge (update msg_end) или новый кластер
+```
+
+**Что решено:** cold-start (один текст → один кластер), msg_index передаётся из gateway (глобальный счётчик `_chunk_msg_counter`), DeepSeek title работает (исправлен JSON-промпт). См. `references/single-message-chunker.md`.
+
+**Почему инкрементальный, а не batch:**
+- Batch при `/new`: 525 эмбеддингов за раз → Ollama ReadTimeout на CPU
+- Инкрементальный: 10 эмбеддингов за раз, по мере поступления сообщений
+- Нагрузка снижена в 50 раз, Ollama не choke'ается
+- Не нужен `/new` для чанкинга — кластеры обновляются continuously
+
+**Известная проблема:** qwen3-embedding:0.6b на CPU не тянет batch > 20 текстов (ReadTimeout 120s). Для инкрементального режима с batch=10 — безопасно. Для холодного старта (batch-режим `--mode full`) — ограничение ≤100 сообщений или async embed.
+
+**Важно — две разные константы:**
+- `BATCH_SIZE` в `chunk_session.py` — размер batch для вызова Ollama `/api/embed`. Установлен в 5 (экспериментально: 50 → timeout, 1 → слишком медленно, 5 — компромисс).
+- `CHUNK_BATCH_SIZE` в `gateway/run.py` — сколько текстов накопить в очереди перед отправкой в daemon-поток. Установлен в 10 (достаточно для качественного centroid-matching, не нагружает Ollama).
+
+Эти константы НЕ связаны: gateway копит 10 сообщений в RAM, а чанкер шлёт их в Ollama батчами по 5. Путать их — верный путь к ReadTimeout.
+
+**Что решено:** cold-start (один текст → один кластер), msg_index передаётся из gateway (глобальный счётчик `_chunk_msg_counter`), DeepSeek title работает (исправлен JSON-промпт). См. `references/single-message-chunker.md`.
+
+### Кросс-сессионная кластеризация (реализована 30.05.2026 09:55)
+
+**Проблема:** embedding-only кластеризация не различает домены. «Мотор BMW M62B35» и «мотор Honda SC47E» для qwen3 — почти одно и то же (dist < 0.5). Мержатся в один кластер, хотя это разные машины, разные сессии.
+
+**Решение:** двухэтапная кластеризация в `gateway/run.py` (`_bg_chunk_single`):
+
+```
+текст → embed → search_clusters(threshold=0.5, max_age=10)  ← ГЛОБАЛЬНО по всем сессиям
+    → found? ДА → target_sid = found.session_id
+    → found? НЕТ → target_sid = текущая сессия (fallback)
+    → chunk_session.py --single --session-id target_sid --text "..." --msg-index N
+    → incremental_chunk внутри target_sid: centroid matching только с локальными кластерами
+```
+
+`search_clusters` ищет глобально, но внутри `incremental_chunk` — только локально (`get_clusters_with_embeddings(target_sid)`). Чужой кластер не может всплыть. BMW и Honda разъезжаются на этапе recall.
+
+**msg_index:** глобальный счётчик `_chunk_msg_counter` инкрементится при каждом push в deque. Передаётся как `--msg-index N` → `message_range_start/end` проставляются корректно.
+
+**Fallback:** при любой ошибке recall — вызов чанкера с текущей сессией. Double-fallback: ошибка API → ошибка ловится → current session.
+
+### Pitfall: UnboundLocalError при глобальных переменных в gateway/run.py
+
+`_chunk_msg_counter` — модульная переменная. Используется в двух разных `run_sync()` внутри gateway/run.py. Python требует `global _chunk_msg_counter` внутри КАЖДОЙ функции, где есть присваивание (`+= 1`). Если global объявлен только в одной — вторая падает с UnboundLocalError. Подробно: `references/unboundlocalerror-chunk-counter.md`.
+
+### Pitfall: `except: pass` в daemon-потоках глушит ошибки
+
+Паттерн `except Exception: pass` в `_bg_chunk_single` (строка 239) и других daemon-потоках gateway/run.py **полностью скрывает** ошибки: потеря коннекта к pgvector, SQL-сбои, embedding-ошибки. Симптом: кластеры не создаются, логи пусты, диагностика невозможна.
+
+**Решение:** всегда логировать исключение перед fallback:
+```python
+except Exception as e:
+    logger.warning("Chunk worker failed: %s", e)
+    # fallback...
+```
+
+### Pitfall: SQL-баг `INTERVAL '%s days'` в search_clusters (обнаружен и исправлен 30.05.2026)
+
+`recall.py` строка 290: `age_sql = f"AND updated_at > NOW() - INTERVAL '%s days'"` — `'%s'` внутри строкового литерала в SQL приводит к двойным кавычкам `''10''` при подстановке psycopg2 → синтаксическая ошибка. `except: pass` в `_bg_chunk_single` (строка 239 gateway/run.py) глушил ошибку. **Симптом:** recall НИКОГДА не работал для cross-session routing — все запросы уходили в fallback на текущую сессию.
+
+**Исправлено:** `age_sql = f"AND updated_at > NOW() - INTERVAL '{max_age_days} days'"` — значение вставлено прямо в f-строку (max_age_days — int, безопасно от инъекции). Строка `params.insert(-1, str(max_age_days))` удалена.
+
+Подробно: `references/sql-interval-bug-20260530.md`.
+
+### Исправленные баги инкрементального чанкера
+
+**Баг 1 ✅: В очередь попадали reasoning-блоки, user messages — нет**
+Исправлено: user с префиксом `user:`, assistant без reasoning с `assistant:`.
+
+**Баг 2 ✅: `message_range_start/end` — NULL или 0**
+Исправлено: глобальный счётчик `_chunk_msg_counter`. Инкрементится при каждом push в deque. Передаётся как `--msg-index N`.
+
+**Баг 3 ✅: Title/summary — сырой текст**
+Исправлено: синтаксис JSON-промпта в `_annotate_incremental_cluster`. DeepSeek возвращает осмысленные title.
+
+**Баг 4 ✅: Cold start создаёт 1 кластер на все тексты**
+Устранён архитектурно: single-message очередь — один текст → один кластер.
+
+### Исправленный баг: CLI mismatch (обнаружен 30.05.2026, исправлен)
+
+`_bg_chunk_async_incremental` в `gateway/run.py` (строка 184-191) вызывает:
+
+```python
+chunk_session.py --mode incremental --session-id SID --texts '[...]'
+```
+
+Но `chunk_session.py` **не поддерживает** флаги `--mode` и `--texts`. Только `--session-id`, `--model`, `--dry-run`. Результат: argparse падает, `except Exception: pass` глотает ошибку. Очередь накапливает 10 сообщений, дёргает чанкер, он падает — и тишина.
+
+**Симптом:** после 10+ сообщений в `session_clusters` только 1 кластер (автосохранение новой сессии из `_recall_route()`, не из очереди). В логах gateway пусто.
+
+**Решение:** либо добавить `--mode incremental --texts` в `chunk_session.py`, либо переписать `_bg_chunk_async_incremental` на прямой Python-вызов (import, без subprocess).
+
+**Handoff близняшке:** `chunker-cli-mismatch.md` в `Mia/handoff/`.
+
+**Методика тестирования очереди:** см. `references/queue-testing-methodology.md` — 10-сообщенческий тест-драйв без `/new` и перезапусков.
+
+### Пороги (финальные, 29.05.2026)
+
+| Уровень | Давность | Порог | Стратегия |
+|---|---|---|---|
+| 🔥 Hot | ≤ 10 дней | 0.5 | Автоматически при каждом сообщении |
+| 🌡 Warm | 10–30 дней | 0.6 | Fallback при пустом hot |
+| ❄️ Cold | > 30 дней | — | Только LightRAG, по запросу |
+
+## Что НЕ доделано (на будущее)
+
+1. **Clarify-зона (0.5–0.7)** — код реализован, но в боевом потоке не активирован.
+2. **Rerank (v2)** — кросс-энкодер на top-N кластеров для точности.
+3. **Git-форк Mia** — версионирование наших патчей к Hermes, история изменений.
+
+## Приёмочное тестирование cross-session (30.05.2026)
+
+Проведено с двумя темами (BMW E39 vs Honda ST1300):
+
+**Раунд 1 (до фикса SQL-бага):**
+- ✅ Кластеры не смержились — разные темы (sim=0.45 < 0.5)
+- ✅ DeepSeek title: «Вопрос о климат-контроле в BMW E39» (осмысленный)
+- ✅ `message_range_start/end` проставляются (глобальный счётчик)
+- ❌ Recall НЕ нашёл BMW-кластер для мото-сообщения — причина: SQL-баг в `search_clusters` (INTERVAL ''10'' days)
+- ❌ `except: pass` в `_bg_chunk_single` (строка 239 gateway/run.py) скрыл ошибку — fallback молча
+
+**Раунд 2 (после фикса SQL-бага, 30.05.2026, ~11:00):**
+- ✅ `search_clusters` возвращает 2 результата: id=29 (sim=0.87) + id=27 (sim=0.63)
+- ✅ BMW-кластер из сессии `20260527_012044_81b255ae` найден с sim=0.63 > порога 0.5
+- ✅ Ручной тест через Python-скрипт: `search_clusters(emb, threshold=0.5, max_age_days=10)` → работает
+- ⚠️ Боевой тест не проведён (требуется перезапуск gateway или новое сообщение)
+
+Подробно: `references/cross-session-test-20260530.md`, `references/sql-interval-bug-20260530.md`.
+
+## Hermes-инфраструктура
+
+### Compaction: когда и почему срабатывает
+
+Обнаружено 30.05.2026: compaction срабатывает не только по порогу токенов (`threshold: 0.5 × 1M = 500K`), но и:
+
+- **Continuation compaction** — при возобновлении сессии после перезапуска gateway старые сообщения сжимаются в summary-блок `[CONTEXT COMPACTION]`
+- **Hygiene hard limit** — `compression.hygiene_hard_message_limit: 400` сообщений — принудительное сжатие
+
+В нашем случае (216 сообщений, ~136K токенов = 13.6% от 1M) compaction сработал именно при возобновлении сессии после перезапуска gateway в 00:25.
+
+### Auxiliary LLM: явная конфигурация
+
+Все auxiliary-таски должны быть явно прописаны на DeepSeek v4-flash с отключённым thinking. `provider: auto` бессмысленен, когда доступен только один LLM-провайдер. См. `references/auxiliary-llm-config.md`.
+
+## Результаты тестирования чанкера (29.05.2026 21:10+)
+
+Гибридный чанкер протестирован на сессии `cron_003e29c8a5f2` (3 сообщения):
+- ✅ qwen3-embedding отработал batch-embed (3/3 сообщений)
+- ✅ Cosine distance нашёл 1 кластер с порогом 0.5
+- ✅ Кластер сохранён в `session_clusters` с `message_range_start/end`
+- ✅ DeepSeek не вызывался (кластер < min_cluster_size для LLM)
+- ✅ Никаких рекурсий, gateway не перезапускался
+
+**Ключевой инсайт:** разница между hot и warm — не в механике поиска (SQL идентичен), а в том, **КОГДА** мы ищем. Hot — всегда, при каждом сообщении. Warm — только fallback при пустом hot. Без этого разделения поиск по 30-дневным сессиям создавал бы шум на каждом сообщении.
