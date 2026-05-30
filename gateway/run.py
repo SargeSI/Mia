@@ -7856,6 +7856,9 @@ class GatewayRunner:
         if canonical == "resume":
             return await self._handle_resume_command(event)
 
+        if canonical == "sessions":
+            return await self._handle_resume_command(event)
+
         if canonical == "branch":
             return await self._handle_branch_command(event)
 
