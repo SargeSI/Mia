@@ -42,8 +42,9 @@ def _recall_route(user_message: str, agent):
         list  -- augmented conversation_history (match found)
     """
     try:
-        import sys as _sys
-        _sys.path.insert(0, "/home/mia/.hermes/skills/recall")
+        import os as _os, sys as _sys
+        _recall_base = _os.path.join(_os.environ.get("HERMES_HOME", "/home/mia/.hermes"), "skills", "recall")
+        _sys.path.insert(0, _recall_base)
         from recall import load_config, EmbeddingClient, PgVectorStore
         from datetime import datetime, timezone
 
@@ -207,8 +208,9 @@ def _bg_chunk_single(session_id: str, text: str, msg_index: int):
 
     def _do_chunk():
         try:
-            import _sys as __sys
-            __sys.path.insert(0, "/home/mia/.hermes/skills/recall")
+            import os as _bg_os, sys as __sys
+            _bg_recall_base = _bg_os.path.join(_bg_os.environ.get("HERMES_HOME", "/home/mia/.hermes"), "skills", "recall")
+            __sys.path.insert(0, _bg_recall_base)
             from recall import load_config, EmbeddingClient, PgVectorStore
             import numpy as _np
 
@@ -237,7 +239,7 @@ def _bg_chunk_single(session_id: str, text: str, msg_index: int):
             _subprocess.run(
                 [
                     __sys.executable,
-                    "/home/mia/.hermes/skills/recall/tools/chunk_session.py",
+                    _bg_os.path.join(_bg_recall_base, "tools", "chunk_session.py"),
                     "--single",
                     "--session-id", target_sid,
                     "--text", text,
@@ -252,7 +254,7 @@ def _bg_chunk_single(session_id: str, text: str, msg_index: int):
                 _subprocess.run(
                     [
                         _sys.executable,
-                        "/home/mia/.hermes/skills/recall/tools/chunk_session.py",
+                        _bg_os.path.join(_bg_recall_base, "tools", "chunk_session.py"),
                         "--single",
                         "--session-id", session_id,
                         "--text", text,
@@ -279,7 +281,7 @@ def _bg_chunk_async(session_id: str):
             _subprocess.run(
                 [
                     _sys.executable,
-                    "/home/mia/.hermes/skills/recall/tools/chunk_session.py",
+                    _bg_os.path.join(_bg_recall_base, "tools", "chunk_session.py"),
                     "--session-id", session_id,
                 ],
                 capture_output=True,
@@ -299,10 +301,12 @@ def _bg_update_embedding_async(session_id: str, last_response: str):
 
     def _do_update():
         try:
+            import os as _upd_os
+            _upd_recall_base = _upd_os.path.join(_upd_os.environ.get("HERMES_HOME", "/home/mia/.hermes"), "skills", "recall")
             _subprocess.run(
                 [
                     _sys.executable,
-                    "/home/mia/.hermes/skills/recall/tools/update_embedding.py",
+                    _upd_os.path.join(_upd_recall_base, "tools", "update_embedding.py"),
                     "--session-id", session_id,
                     "--text", last_response[:1000],
                 ],
