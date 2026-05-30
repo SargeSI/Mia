@@ -35,9 +35,11 @@ def load_config() -> dict:
 class EmbeddingClient:
     """Векторизация текста через Ollama API."""
 
-    def __init__(self, url: str, model: str):
+    def __init__(self, url: str, model: str, timeout: int = None, batch_timeout: int = None):
         self.url = url
         self.model = model
+        self.timeout = timeout or 30
+        self.batch_timeout = batch_timeout or 120
 
 
     def batch_embed(self, texts: list[str]) -> list[list[float]]:
@@ -46,7 +48,7 @@ class EmbeddingClient:
         resp = requests.post(
             batch_url,
             json={"model": self.model, "input": texts},
-            timeout=120,
+            timeout=self.batch_timeout,
         )
         resp.raise_for_status()
         return resp.json()["embeddings"]
@@ -55,7 +57,7 @@ class EmbeddingClient:
     def embed(self, text: str) -> list[float]:
         """Получить embedding текста. Возвращает список float размерности vector_dim."""
         payload = {"model": self.model, "prompt": text}
-        resp = requests.post(self.url, json=payload, timeout=15)
+        resp = requests.post(self.url, json=payload, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()["embedding"]
 

@@ -52,7 +52,12 @@ def _recall_route(user_message: str, agent):
 
         current_sid = agent.session_id
         config = load_config()
-        embedder = EmbeddingClient(config["ollama"]["url"], config["ollama"]["model"])
+        embedder = EmbeddingClient(
+            config["ollama"]["url"],
+            config["ollama"]["model"],
+            timeout=config["ollama"].get("embed_timeout", 30),
+            batch_timeout=config["ollama"].get("batch_timeout", 120),
+        )
         store = PgVectorStore(config["postgresql"])
 
         # Auto-save: create initial cluster if session not yet in session_clusters
@@ -208,7 +213,12 @@ def _bg_chunk_single(session_id: str, text: str, msg_index: int):
             import numpy as _np
 
             config = load_config()
-            embedder = EmbeddingClient(config["ollama"]["url"], config["ollama"]["model"])
+            embedder = EmbeddingClient(
+            config["ollama"]["url"],
+            config["ollama"]["model"],
+            timeout=config["ollama"].get("embed_timeout", 30),
+            batch_timeout=config["ollama"].get("batch_timeout", 120),
+        )
             store = PgVectorStore(config["postgresql"])
 
             # Find target session via pgvector
@@ -297,7 +307,7 @@ def _bg_update_embedding_async(session_id: str, last_response: str):
                     "--text", last_response[:1000],
                 ],
                 capture_output=True,
-                timeout=15,
+                timeout=30,
             )
         except Exception:
             pass
