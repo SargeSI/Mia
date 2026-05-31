@@ -93,13 +93,13 @@ def is_stop_word(msg: str) -> bool:
 
     # Если сообщение многословное — стоп-фильтр не применяем
     # (даже если начинается с "ок" — дальше идёт тематический текст)
-    if msg_words(msg) > 2:
-        return False
-
-    # Фатические фразы — проверка подстроки
+    # НО: фатические фразы проверяем ДО этого — они по определению многословные
     for phrase in sw.get("phatic_phrases", []):
         if phrase in clean:
             return True
+
+    if msg_words(msg) > 2:
+        return False
 
     return False
 
@@ -129,6 +129,11 @@ def is_diffuse(embedding, store, msg: str, threshold: float = 0.3, limit: int = 
     # Если даже лучший кандидат слабый — сообщение размытое
     if top1_sim < 0.4:
         return True
+
+    # Если лучший кандидат имеет sim > 0.5 — тема определена,
+    # не считаем размытым даже при маленьком разрыве
+    if top1_sim > 0.5:
+        return False
 
     # Адаптивный порог по длине сообщения
     length = len(msg)
