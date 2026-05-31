@@ -126,9 +126,10 @@ def is_diffuse(embedding, store, msg: str, threshold: float = 0.3, limit: int = 
     top2_sim = clusters[1]["similarity"]
     diff = top1_sim - top2_sim
 
-    # Если даже лучший кандидат слабый — сообщение размытое
-    if top1_sim < 0.4:
-        return True
+    # Если лучший кандидат очень слабый (< 0.45) — темы просто нет в БД,
+    # это не размытость. Пропускаем в слой 3, который скажет continue.
+    if top1_sim < 0.45:
+        return False
 
     # Если лучший кандидат имеет sim > 0.5 — тема определена,
     # не считаем размытым даже при маленьком разрыве
