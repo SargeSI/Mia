@@ -496,7 +496,18 @@ class RecallEngine:
             threshold = self.thresholds.get("adaptive_high_sessions", 0.85)
 
         query_emb = self.embedder.embed(query_text)
-        candidates = self.store.search_nearest(query_emb, self.thresholds["clarify_low"], limit=3)
+        candidates_raw = self.store.search_clusters(
+            query_emb, self.thresholds["clarify_low"], limit=3, max_age_days=10
+        )
+        candidates = [
+            {
+                "session_id": c["session_id"],
+                "topic": c["cluster_title"],
+                "cluster_title": c["cluster_title"],
+                "similarity": c["similarity"],
+            }
+            for c in candidates_raw
+        ]
 
         if not candidates:
             return {
