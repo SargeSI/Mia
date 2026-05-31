@@ -2302,33 +2302,66 @@ class SessionDB:
 
     @staticmethod
     def _is_cjk_codepoint(cp: int) -> bool:
-        return (0x4E00 <= cp <= 0x9FFF or    # CJK Unified Ideographs
+        """Backward-compat alias — delegates to _is_non_latin_codepoint."""
+        return SessionDB._is_non_latin_codepoint(cp)
+
+    @staticmethod
+    def _is_non_latin_codepoint(cp: int) -> bool:
+        """Check if a codepoint is non-Latin (Cyrillic, CJK, Arabic, etc.).
+
+        Unicode ranges covered:
+          - Cyrillic: U+0400-U+04FF, U+0500-U+052F (Russian, Ukrainian, etc.)
+          - Cyrillic Extended: U+2DE0-U+2DFF, U+A640-U+A69F, U+1C80-U+1C8F
+          - CJK: U+4E00-U+9FFF, U+3400-U+4DBF, U+20000-U+2A6DF
+          - CJK Symbols/Hiragana/Katakana: U+3000-U+30FF
+          - Hangul: U+AC00-U+D7AF
+          - Arabic: U+0600-U+06FF, U+0750-U+077F, U+FB50-U+FDFF, U+FE70-U+FEFF
+          - Hebrew: U+0590-U+05FF
+          - Thai: U+0E00-U+0E7F
+          - Devanagari: U+0900-U+097F
+        """
+        return (0x0400 <= cp <= 0x04FF or    # Cyrillic
+                0x0500 <= cp <= 0x052F or    # Cyrillic Supplement
+                0x2DE0 <= cp <= 0x2DFF or    # Cyrillic Extended-A
+                0xA640 <= cp <= 0xA69F or    # Cyrillic Extended-B
+                0x1C80 <= cp <= 0x1C8F or    # Cyrillic Extended-C
+                0x4E00 <= cp <= 0x9FFF or    # CJK Unified Ideographs
                 0x3400 <= cp <= 0x4DBF or    # CJK Extension A
                 0x20000 <= cp <= 0x2A6DF or  # CJK Extension B
                 0x3000 <= cp <= 0x303F or    # CJK Symbols
                 0x3040 <= cp <= 0x309F or    # Hiragana
                 0x30A0 <= cp <= 0x30FF or    # Katakana
-                0xAC00 <= cp <= 0xD7AF)      # Hangul Syllables
+                0xAC00 <= cp <= 0xD7AF or    # Hangul Syllables
+                0x0600 <= cp <= 0x06FF or    # Arabic
+                0x0750 <= cp <= 0x077F or    # Arabic Supplement
+                0xFB50 <= cp <= 0xFDFF or    # Arabic Presentation Forms-A
+                0xFE70 <= cp <= 0xFEFF or    # Arabic Presentation Forms-B
+                0x0590 <= cp <= 0x05FF or    # Hebrew
+                0x0E00 <= cp <= 0x0E7F or    # Thai
+                0x0900 <= cp <= 0x097F)      # Devanagari
 
     @staticmethod
     def _contains_cjk(text: str) -> bool:
-        """Check if text contains CJK (Chinese, Japanese, Korean) characters."""
+        """Backward-compat alias — delegates to _contains_non_latin."""
+        return SessionDB._contains_non_latin(text)
+
+    @staticmethod
+    def _contains_non_latin(text: str) -> bool:
+        """Check if text contains non-Latin characters (Cyrillic, CJK, Arabic, etc.)."""
         for ch in text:
-            cp = ord(ch)
-            if (0x4E00 <= cp <= 0x9FFF or    # CJK Unified Ideographs
-                0x3400 <= cp <= 0x4DBF or    # CJK Extension A
-                0x20000 <= cp <= 0x2A6DF or  # CJK Extension B
-                0x3000 <= cp <= 0x303F or    # CJK Symbols
-                0x3040 <= cp <= 0x309F or    # Hiragana
-                0x30A0 <= cp <= 0x30FF or    # Katakana
-                0xAC00 <= cp <= 0xD7AF):     # Hangul Syllables
+            if SessionDB._is_non_latin_codepoint(ord(ch)):
                 return True
         return False
 
     @classmethod
     def _count_cjk(cls, text: str) -> int:
-        """Count CJK characters in text."""
-        return sum(1 for ch in text if cls._is_cjk_codepoint(ord(ch)))
+        """Backward-compat alias — delegates to _count_non_latin."""
+        return cls._count_non_latin(text)
+
+    @classmethod
+    def _count_non_latin(cls, text: str) -> int:
+        """Count non-Latin characters (Cyrillic, CJK, Arabic, etc.) in text."""
+        return sum(1 for ch in text if cls._is_non_latin_codepoint(ord(ch)))
 
     def search_messages(
         self,
@@ -2432,33 +2465,32 @@ class SessionDB:
             LIMIT ? OFFSET ?
         """
 
-        # CJK queries bypass the unicode61 FTS5 table.  The default tokenizer
-        # splits CJK characters into individual tokens, so "大别山项目" becomes
-        # "大 AND 别 AND 山 AND 项 AND 目" — producing false positives and
-        # missing exact phrase matches.
+        # Non-Latin queries (Cyrillic, CJK, Arabic, etc.) bypass the unicode61
+        # FTS5 table.  The default tokenizer splits non-Latin characters into
+        # individual tokens, producing false positives and missing exact phrase
+        # matches.
         #
-        # For queries with 3+ CJK characters, we use the trigram FTS5 table
-        # (indexed substring matching with ranking and snippets).  For shorter
-        # CJK queries (1-2 chars), trigram can't match (it needs ≥9 UTF-8
-        # bytes = 3 CJK chars), so we fall back to LIKE.
-        is_cjk = self._contains_cjk(query)
-        if is_cjk:
+        # For queries with 3+ non-Latin characters, we use the trigram FTS5
+        # table (indexed substring matching with ranking and snippets).  For
+        # shorter non-Latin queries (1-2 chars), trigram can't match (it needs
+        # >=9 UTF-8 bytes = 3 chars), so we fall back to LIKE.
+        is_non_latin = self._contains_non_latin(query)
+        if is_non_latin:
             raw_query = query.strip('"').strip()
-            cjk_count = self._count_cjk(raw_query)
+            non_latin_count = self._count_non_latin(raw_query)
 
-            # Per-token CJK length check (#20494): trigram needs >=3 CJK chars
-            # per token. A query like "广西 OR 桂林 OR 漓江" has cjk_count=6
-            # (>=3) but each individual token is only 2 chars — trigram returns 0.
-            # Route to LIKE when any non-operator CJK token is <3 CJK chars.
+            # Per-token non-Latin length check: trigram needs >=3 chars
+            # per token. A query with multiple short tokens (e.g. CJK
+            # bi-grams) needs the LIKE path.
             _tokens_for_check = [
                 t for t in raw_query.split()
-                if t.upper() not in {"AND", "OR", "NOT"} and self._contains_cjk(t)
+                if t.upper() not in {"AND", "OR", "NOT"} and self._contains_non_latin(t)
             ]
-            _any_short_cjk = any(
-                self._count_cjk(t) < 3 for t in _tokens_for_check
+            _any_short_non_latin = any(
+                self._count_non_latin(t) < 3 for t in _tokens_for_check
             )
 
-            if cjk_count >= 3 and not _any_short_cjk:
+            if non_latin_count >= 3 and not _any_short_non_latin:
                 # Trigram FTS5 path — quote each non-operator token to handle
                 # FTS5 special chars (%, *, etc.) while preserving boolean
                 # operators (AND, OR, NOT) for multi-term queries.

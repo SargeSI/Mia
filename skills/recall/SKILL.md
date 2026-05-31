@@ -111,21 +111,17 @@ author: Mia & Sergey
 - НЕ сливать сессии без подтверждения пользователя
 - НЕ создавать новую сессию при sim > 0.5 без уточнения
 - **НЕ обновлять embedding синхронно перед ответом пользователю** — задержка 200-500 мс на каждом сообщении неприемлема. Всегда фон: `terminal(background=True)` или cron.
-- **НЕ полагаться на `session_search()` для русскоязычных запросов** — FTS5 с `unicode61` токенизатором не индексирует кириллицу. Всегда делай прямой SQLite `LIKE`-fallback. Подробнее: `recall-router` → «CRITICAL PITFALL: FTS5 не работает с русским текстом».
+- **`session_search()` для русскоязычных запросов работает** — FTS5 автоматически направляет нелатинские запросы в триграмную таблицу `messages_fts_trigram`, которая корректно индексирует кириллицу. Исправлено 31.05.2026 (hermes_state.py).
 
-## Pitfall: FTS5 + русский язык (обнаружено 31.05.2026)
+## Pitfall: FTS5 + русский язык (исправлено 31.05.2026)
 
-SQLite FTS5 с `unicode61` (без `tokenchars`) ломает кириллицу — русские слова не индексируются. `session_search()` всегда возвращает пустой результат для запросов на русском. Это создаёт ложное впечатление, что «pgvector не работает» или «сообщение не сохранилось». На деле сообщение всегда можно найти прямым SQLite `LIKE` — см. `recall-router`.
+SQLite FTS5 с `unicode61` токенизатором ломает кириллицу — русские слова не индексируются как целые токены. Таблица `messages_fts_trigram` (создана в Hermes v0.14) использует триграмный токенизатор, корректно работающий с любой письменностью.
 
-**Дизайн-решение:** FTS5 не заменяем (вшит в ядро Hermes, форк сломает апстрим-обновления). Архитектура — гибрид: pgvector primary, FTS5 для EN/CJK, SQLite LIKE для русского. Подробный анализ вариантов: `references/fts5-design-decision.md`.
+**Решение:** `SessionDB.search_messages()` расширен — `_contains_cjk()` заменён на `_contains_non_latin()` с диапазонами кириллицы (U+0400–U+04FF, Supplement, Extended-A/B/C). Все нелатинские запросы (русский, арабский, CJK) автоматически направляются в `messages_fts_trigram`. Порог — 3 нелатинских символа для триграмного пути.
 
-## Pitfall: split-brain — `analyze()` ищет в `recall_sessions`, данные в `session_clusters` (обнаружено 31.05.2026, НЕ ИСПРАВЛЕНО)
+## Pitfall: split-brain — `analyze()` искал в `recall_sessions` (исправлено 31.05.2026)
 
-`RecallEngine.analyze()` (recall.py:470-499) вызывает `PgVectorStore.search_nearest()` → `SELECT FROM recall_sessions`. Но после перехода на кластерную архитектуру v2 новые сессии пишутся **только** в `session_clusters`. Метод `search_clusters()` существует (recall.py:285-322) и работает, но `analyze()` его не вызывает.
-
-**Симптом:** `search_sessions.py` всегда возвращает `[]` для новых сессий. Gateway работает (использует `search_clusters()` напрямую), CLI/агент — нет.
-
-**Исправление:** заменить `search_nearest()` → `search_clusters()` в `analyze()`, сгруппировать результаты по `session_id`.
+`RecallEngine.analyze()` вызывал `PgVectorStore.search_nearest()` → устаревшая таблица `recall_sessions` (не пополняется после миграции v2). Заменено на `search_clusters()` (session_clusters) с маппингом `cluster_title` → `topic`. `search_sessions.py` снова находит сессии.
 
 Подробно: `references/split-brain-search-nearest-20260531.md`
 
