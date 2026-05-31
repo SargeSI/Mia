@@ -29,24 +29,27 @@ except ModuleNotFoundError:
 
 def _recall_route(user_message: str, agent):
     """
-    Two-pass cluster-based recall:
+    Three-layer recall guard via recall_router.decide().
 
-    1. HOT (<=10 days): search session_clusters, threshold 0.5
-    2. WARM (10-30 days): fallback, threshold 0.6
-
-    If a cluster is found, loads conversation context from state.db
-    and prepends a recall-system header.
+    Layer 0: syntactic — < 3 words without proper noun → skip
+    Layer 1: grammatical — stop-word dictionary (interjections, phatics)
+    Layer 2: dispersion — adaptive similarity gap threshold
+    Layer 3: standard recall — auto_switch (0.7) / clarify (0.5) / continue
 
     Returns:
-        None  -- stay in current session
-        list  -- augmented conversation_history (match found)
+        None  -- stay in current session (skip / continue / no match)
+        list  -- augmented conversation_history (auto_switch / clarify)
     """
     try:
         import os as _os, sys as _sys
-        _recall_base = _os.path.join(_os.environ.get("HERMES_HOME", "/home/mia/.hermes"), "skills", "recall")
+        _recall_base = _os.path.join(
+            _os.environ.get("HERMES_HOME", "/home/mia/.hermes"),
+            "skills", "recall",
+        )
         _sys.path.insert(0, _recall_base)
+
         from recall import load_config, EmbeddingClient, PgVectorStore
-        from datetime import datetime, timezone
+        from recall_router import decide
 
         if not hasattr(agent, "session_id") or not agent.session_id:
             return None
@@ -63,49 +66,31 @@ def _recall_route(user_message: str, agent):
 
         # Auto-save: create initial cluster if session not yet in session_clusters
         if not store.has_session_clusters(current_sid):
-            topic = user_message[:80].replace("\n", " ").strip()
-            if not topic:
-                topic = "new session"
+            topic = user_message[:80].replace("\n", " ").strip() or "new session"
             emb = embedder.embed(user_message)
             store.insert_cluster(
-                session_id=current_sid,
-                title=topic,
-                summary=user_message[:200],
-                embedding=emb,
+                session_id=current_sid, title=topic,
+                summary=user_message[:200], embedding=emb,
             )
 
         emb = embedder.embed(user_message)
-        threshold_hot = config.get("thresholds", {}).get("hot_search", 0.5)
-        threshold_warm = config.get("thresholds", {}).get("warm_search", 0.6)
+        decision, context = decide(user_message, emb, store, current_sid)
 
-        # ---- PASS 1: HOT search (<=10 days) ----
-        hot = store.search_clusters(emb, threshold=threshold_hot, limit=10, max_age_days=10)
-        hot = [c for c in hot if c["session_id"] != current_sid]
-
-        if hot:
-            return _build_recall_context(hot, store, agent, label="HOT")
-
-        # ---- PASS 2: WARM search (10-30 days) ----
-        warm_all = store.search_clusters(emb, threshold=threshold_warm, limit=10, max_age_days=30)
-        # Filter: age > 10 days
-        now = datetime.now(timezone.utc)
-        warm = []
-        for c in warm_all:
-            if c["session_id"] == current_sid:
-                continue
-            if c.get("updated_at"):
-                try:
-                    age_days = (now - datetime.fromisoformat(c["updated_at"])).days
-                    if age_days > 10:
-                        warm.append(c)
-                except Exception:
-                    pass
-
-        if warm:
-            return _build_recall_context(warm, store, agent, label="WARM")
-
-        store.close()
-        return None
+        if decision == "skip":
+            store.close()
+            return None
+        elif decision == "continue":
+            store.close()
+            return None
+        elif decision == "auto_switch":
+            result = _build_recall_context([context], store, agent, label="RECALL")
+            return result
+        elif decision == "clarify":
+            result = _build_recall_context([context], store, agent, label="CLARIFY")
+            return result
+        else:
+            store.close()
+            return None
 
     except Exception as _recall_exc:
         try:
@@ -137,10 +122,12 @@ def _build_recall_context(clusters, store, agent, label="HOT"):
         for m in recent
     ]
 
-    if label == "WARM":
-        prefix = "[RECALL: warm memory — session={sid}, topics={topics}, sim={sim:.2f}. Continuing this past conversation.]"
+    if label == "CLARIFY":
+        prefix = "[RECALL: clarification — possible topic match: session={sid}, topics={topics}, sim={sim:.2f}. User will confirm or deny. Use this context to answer but mention the topic.]"
+    elif label == "RECALL":
+        prefix = "[RECALL: auto-switched — session={sid}, topics={topics}, sim={sim:.2f}. Answer using this context as if you are continuing this conversation.]"
     else:
-        prefix = "[RECALL: auto-switched — session={sid}, topics={topics}, sim={sim:.2f}. Answer using this context.]"
+        prefix = "[RECALL: memory — session={sid}, topics={topics}, sim={sim:.2f}]"
 
     recall_header = prefix.format(
         sid=found_sid, topics=", ".join(titles), sim=sim
