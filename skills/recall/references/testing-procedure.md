@@ -3,8 +3,8 @@
 ## Quick smoke test
 
 ```bash
-cd /home/mia/.hermes/skills/recall
-VENV=/home/mia/.hermes/hermes-agent/venv/bin/python3
+cd /home/mia/Mia/skills/recall
+VENV=/home/mia/Mia/.venv/bin/python3
 
 # 1. Save current session
 $VENV tools/save_session.py --session-id "Born_Mia" --topic "Test Topic" --text "Description of what this session is about"
@@ -45,5 +45,5 @@ Key takeaway: recall correctly distinguishes topics. "Thinking mode" query finds
 - Database: hermes_recall, user: mia
 - Table: recall_sessions (session_id, topic, embedding vector(1024))
 - Ollama: 192.168.51.17:11434, model qwen3-embedding:0.6b
-- Venv: /home/mia/.hermes/hermes-agent/venv/bin/python3
+- Venv: /home/mia/Mia/.venv/bin/python3
 - Dependencies: psycopg2-binary, numpy, requests (installed)

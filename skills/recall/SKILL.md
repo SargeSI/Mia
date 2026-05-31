@@ -50,10 +50,10 @@ author: Mia & Sergey
 
 ## Как вызывать инструменты
 
-Все скрипты лежат в `/home/mia/.hermes/skills/recall/tools/`. Запуск:
+Все скрипты лежат в `/home/mia/Mia/skills/recall/tools/`. Запуск:
 
 ```
-/home/mia/.hermes/hermes-agent/venv/bin/python3 /home/mia/.hermes/skills/recall/tools/search_sessions.py "текст запроса" --threshold 0.5 --current-session $SESSION_ID
+/home/mia/Mia/.venv/bin/python3 /home/mia/Mia/skills/recall/tools/search_sessions.py "текст запроса" --threshold 0.5 --current-session $SESSION_ID
 ```
 
 Каждый скрипт возвращает JSON. Читай stdout.
@@ -343,11 +343,53 @@ chunk_session.py --mode incremental --session-id SID --texts '[...]'
 | 🌡 Warm | 10–30 дней | 0.6 | Fallback при пустом hot |
 | ❄️ Cold | > 30 дней | — | Только LightRAG, по запросу |
 
+## Защита от ложных переключений (трёхслойная, спроектирована 30.05.2026)
+
+**Проблема:** нейтральные сообщения («Привет», «Давай», «Как дела?», «Как там погода?») вызывают ложные переключения recall. Их эмбеддинги семантически бедные, cosine similarity — лотерея.
+
+**Решение:** трёхслойная защита в модуле `recall_router.py` (handoff: `recall_three_layer_guard.md`):
+
+```
+Сообщение → Слой 1 (стоп-словарь) → Слой 2 (дисперсия) → Слой 3 (штатный recall)
+```
+
+### Слой 1: стоп-словарь (`stop_words.json`)
+
+JSON-файл со списками `words` и `phrases`. Если сообщение пользователя (lowercase, без пунктуации) полностью совпадает со словом или содержит фразу — **пропустить, не дёргать recall.**
+
+```json
+{"words": ["привет", "давай", "ок", "ага"], "phrases": ["как дела", "что нового"]}
+```
+
+Куратор-LLM (DeepSeek v4-flash без thinking) раз в неделю ревьюит словарь: удаляет ложные стоп-слова, добавляет новые на основе логов `recall_decisions.jsonl`.
+
+### Слой 2: дисперсия эмбеддинга
+
+Математическая проверка «размытости» сообщения. Если разница между sim топ-1 и топ-2 кластера < 0.15 — сообщение не имеет явного тематического пика → **пропустить.**
+
+```python
+def is_diffuse(embedding, store):
+    clusters = store.search_clusters(embedding, threshold=0.3, limit=5)
+    if len(clusters) < 2: return False
+    return (clusters[0]["similarity"] - clusters[1]["similarity"]) < 0.15
+```
+
+Примеры:
+- «Привет» → top1=0.42, top2=0.38, diff=0.04 → **размытое** ✅
+- «Люфт в рулевом e39» → top1=0.78, top2=0.41, diff=0.37 → **чёткое** ✅
+
+### Слой 3: штатный recall
+
+Без изменений. Пороги: 0.7 auto_switch, 0.5-0.7 clarify, <0.5 continue.
+
+### Модуль `recall_router.py`
+
+Независимый Python-модуль в `skills/recall/recall_router.py`. Метод `decide(user_message, embedding, store, current_session_id)` возвращает одно из: `"skip"`, `"auto_switch"`, `"clarify"`, `"continue"`. Используется и gateway, и (в будущем) CLI.
+
 ## Что НЕ доделано (на будущее)
 
-1. **Clarify-зона (0.5–0.7)** — код реализован, но в боевом потоке не активирован.
-2. **Rerank (v2)** — кросс-энкодер на top-N кластеров для точности.
-3. **Git-форк Mia** — версионирование наших патчей к Hermes, история изменений.
+1. **Rerank (v2)** — кросс-энкодер на top-N кластеров для точности.
+2. **CLI-интеграция recall** — сейчас только gateway, `cli.py` не трогали.
 
 ## Приёмочное тестирование cross-session (30.05.2026)
 
@@ -384,6 +426,10 @@ chunk_session.py --mode incremental --session-id SID --texts '[...]'
 Все auxiliary-таски должны быть явно прописаны на DeepSeek v4-flash с отключённым thinking. `provider: auto` бессмысленен, когда доступен только один LLM-провайдер. См. `references/auxiliary-llm-config.md`.
 
 ## Результаты тестирования чанкера (29.05.2026 21:10+)
+
+### Pitfall: HERMES_HOME migration — путаница направления
+
+При переносе HERMES_HOME близняшка (Cursor-Мия) консолидировала все runtime-файлы ВНУТРЬ git-репы `Mia/`, а в `~/.hermes/` сделала симлинки. Это обратное направление: правильно — физические файлы в `~/.hermes/` (стандартный HERMES_HOME), а `Mia/` — чистый репозиторий только с кодом. При написании handoff'ов о миграции всегда указывай направление явно: «MOVE FROM Mia/ TO .hermes/». Подробно: `references/hermes-home-migration-pitfall.md`.
 
 Гибридный чанкер протестирован на сессии `cron_003e29c8a5f2` (3 сообщения):
 - ✅ qwen3-embedding отработал batch-embed (3/3 сообщений)
