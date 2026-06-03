@@ -36,19 +36,30 @@ def _msg_text(msg: dict) -> str:
 # ── Incremental mode ───────────────────────────────────────────────────────
 
 def _annotate_incremental_cluster(cluster_texts: list[str]) -> tuple[str, str]:
-    """Generate title + summary via DeepSeek for incremental chunk."""
+    """Generate title + summary via DeepSeek for incremental chunk.
+    Prompt in Russian so cluster titles match the chat language."""
     text_blob = " ".join(t[:200] for t in cluster_texts[:5])
     if not text_blob.strip():
         return "", ""
     prompt = (
-        "Give a SHORT title (up to 10 words) and a SHORT summary (2-3 sentences) "
-        "for this conversation fragment. "
-        "Respond strictly in JSON.\n\n"
-        "Fragment:\n" + text_blob
+        "Дай КРАТКИЙ заголовок (до 10 слов) и КРАТКОЕ описание (2-3 предложения) "
+        "для этого фрагмента переписки.\n"
+        "Пиши на том же языке, на котором написан фрагмент.\n"
+        "Ответь строго в JSON.\n\n"
+        "Фрагмент:\n" + text_blob
     )
     import requests
     DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-    DEEPSEEK_KEY = "REDACTED"
+    DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not DEEPSEEK_KEY:
+        # Fallback: try reading from .env directly
+        _env_path = os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")), ".env")
+        if os.path.exists(_env_path):
+            with open(_env_path) as _f:
+                for _line in _f:
+                    if _line.startswith("DEEPSEEK_API_KEY="):
+                        DEEPSEEK_KEY = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
     try:
         resp = requests.post(
             DEEPSEEK_URL,

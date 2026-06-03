@@ -17362,8 +17362,10 @@ class GatewayRunner:
                 if _pending is not None:
                     _msg = message.strip()
                     if _msg == "0":
-                        return {"final_response": "Остаёмся в текущей теме. Продолжай."}
-                    if _msg in ("новая", "new"):
+                        # User chose "stay" — let the original message through
+                        # to the agent. Do NOT replace with a canned response.
+                        pass  # fall through to normal agent processing
+                    elif _msg in ("новая", "new"):
                         # Trigger /new via the built-in handler
                         from hermes_state import SessionDB
                         _db = SessionDB()
