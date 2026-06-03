@@ -82,11 +82,15 @@ def _recall_route(user_message: str, agent):
         elif decision == "continue":
             store.close()
             return None
+        elif decision == "clarify":
+            # Do NOT inject foreign session context into the agent's prompt.
+            # Per recall spec: sim 0.5-0.7 → ask the USER, not the agent.
+            # Return («clarify», candidates) tuple for the caller.
+            clarify_candidates = store.search_clusters(emb, threshold=0.5, limit=3)
+            store.close()
+            return ("clarify", clarify_candidates)
         elif decision == "auto_switch":
             result = _build_recall_context([context], store, agent, label="RECALL")
-            return result
-        elif decision == "clarify":
-            result = _build_recall_context([context], store, agent, label="CLARIFY")
             return result
         else:
             store.close()
@@ -122,9 +126,7 @@ def _build_recall_context(clusters, store, agent, label="HOT"):
         for m in recent
     ]
 
-    if label == "CLARIFY":
-        prefix = "[RECALL: clarification — possible topic match: session={sid}, topics={topics}, sim={sim:.2f}. User will confirm or deny. Use this context to answer but mention the topic.]"
-    elif label == "RECALL":
+    if label == "RECALL":
         prefix = "[RECALL: auto-switched — session={sid}, topics={topics}, sim={sim:.2f}. Answer using this context as if you are continuing this conversation.]"
     else:
         prefix = "[RECALL: memory — session={sid}, topics={topics}, sim={sim:.2f}]"
@@ -17340,9 +17342,26 @@ class GatewayRunner:
                     _conversation_kwargs["persist_user_message"] = message
 
                 # === RECALL ROUTER HOOK ===
-                _recall_history = _recall_route(message, agent)
-                if _recall_history is not None:
-                    _conversation_kwargs["conversation_history"] = _recall_history
+                _recall_result = _recall_route(message, agent)
+                if _recall_result is not None:
+                    if isinstance(_recall_result, tuple) and _recall_result[0] == "clarify":
+                        # Clarify zone (sim 0.5-0.7): ask the USER via platform,
+                        # NOT the agent via prompt injection. Build a candidate
+                        # list and return it as the response to this turn.
+                        candidates = _recall_result[1]
+                        lines = ["🤔 Clarification: possible topic matches\n"]
+                        for i, c in enumerate(candidates[:3], 1):
+                            lines.append(
+                                f"{i}. {c['cluster_title']} "
+                                f"(sim={c['similarity']:.2f})"
+                            )
+                        lines.append(
+                            "\nReply with the number or "
+                            "type «new» for a fresh session."
+                        )
+                        return "\n".join(lines)
+                    else:
+                        _conversation_kwargs["conversation_history"] = _recall_result
 
                 # === RECALL: feed user msg to chunk queue ===
                 _agent_sid_pre = getattr(agent, "session_id", None)
