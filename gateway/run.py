@@ -17347,7 +17347,7 @@ class GatewayRunner:
                     if isinstance(_recall_result, tuple) and _recall_result[0] == "clarify":
                         # Clarify zone (sim 0.5-0.7): ask the USER via platform,
                         # NOT the agent via prompt injection. Build a candidate
-                        # list and return it as the response to this turn.
+                        # list and return as a final_response dict.
                         candidates = _recall_result[1]
                         lines = ["🤔 Clarification: possible topic matches\n"]
                         for i, c in enumerate(candidates[:3], 1):
@@ -17359,7 +17359,9 @@ class GatewayRunner:
                             "\nReply with the number or "
                             "type «new» for a fresh session."
                         )
-                        return "\n".join(lines)
+                        # Return as dict so the caller (line 8084) can process
+                        # this as a final_response without .get() error
+                        return {"final_response": "\n".join(lines)}
                     else:
                         _conversation_kwargs["conversation_history"] = _recall_result
 
