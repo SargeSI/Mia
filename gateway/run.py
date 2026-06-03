@@ -17362,10 +17362,13 @@ class GatewayRunner:
                 if _pending is not None:
                     _msg = message.strip()
                     if _msg == "0":
-                        # User chose "stay" — clarify is resolved but the
-                        # original message that triggered clarify was already
-                        # consumed. Prompt the user to repeat their question.
-                        return {"final_response": "Остаёмся в текущей теме. Напиши ещё раз о чём речь — твой предыдущий вопрос я пропустила в режиме уточнения."}
+                        # User chose "stay" — restore the original message
+                        # that triggered clarify and let it through to agent.
+                        _orig_msg = _pending.get("_orig_message", "")
+                        if _orig_msg:
+                            message = _orig_msg
+                            _api_run_message = _orig_msg
+                        # fall through to normal agent processing
                     elif _msg in ("новая", "new"):
                         # Trigger /new via the built-in handler
                         from hermes_state import SessionDB
@@ -17407,7 +17410,9 @@ class GatewayRunner:
                         lines.append(
                             "\nОтветь цифрой 0-3, или «новая» для отдельной темы."
                         )
-                        # Remember candidates so we can intercept the reply
+                        # Remember candidates + original message so we can
+                        # intercept the reply and restore context on "stay"
+                        candidates.append({"_orig_message": message})
                         _pending_clarify[session_key] = candidates
                         # Return as dict so the caller (line 8084) can process
                         # this as a final_response without .get() error
