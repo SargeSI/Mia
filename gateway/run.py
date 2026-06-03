@@ -17362,9 +17362,10 @@ class GatewayRunner:
                 if _pending is not None:
                     _msg = message.strip()
                     if _msg == "0":
-                        # User chose "stay" — let the original message through
-                        # to the agent. Do NOT replace with a canned response.
-                        pass  # fall through to normal agent processing
+                        # User chose "stay" — clarify is resolved but the
+                        # original message that triggered clarify was already
+                        # consumed. Prompt the user to repeat their question.
+                        return {"final_response": "Остаёмся в текущей теме. Напиши ещё раз о чём речь — твой предыдущий вопрос я пропустила в режиме уточнения."}
                     elif _msg in ("новая", "new"):
                         # Trigger /new via the built-in handler
                         from hermes_state import SessionDB
