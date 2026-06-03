@@ -150,6 +150,13 @@ def _build_recall_context(clusters, store, agent, label="HOT"):
 import collections
 import time as _time_chunk
 
+# ── Clarify dialog state (pending user response) ──────────────────────
+# When _recall_route() returns a clarify signal, candidates are stored
+# here keyed by session_key. The next user message is checked BEFORE
+# reaching the agent: if it's a numeric selection (0-3) or "new", the
+# clarify dialog is resolved at gateway level without involving the agent.
+_pending_clarify: dict = {}  # session_key → list[dict]
+
 _chunk_deque = collections.deque()
 _chunk_msg_counter = 0
 _chunk_worker_started = False
@@ -8423,6 +8430,8 @@ class GatewayRunner:
 
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+        # Clear any pending clarify dialog for this session
+        _pending_clarify.pop(session_key, None)
         self._cache_session_source(session_key, source)
         if self._is_telegram_topic_lane(source):
             try:
@@ -9566,6 +9575,8 @@ class GatewayRunner:
         # Get existing session key
         session_key = self._session_key_for_source(source)
         self._invalidate_session_run_generation(session_key, reason="session_reset")
+        # Clear any pending clarify dialog for this session
+        _pending_clarify.pop(session_key, None)
 
         # Snapshot the old entry so on_session_finalize can report the
         # expiring session id before reset_session() rotates it.
@@ -10101,6 +10112,8 @@ class GatewayRunner:
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+        # Clear any pending clarify dialog for this session
+        _pending_clarify.pop(session_key, None)
 
         agent = self._running_agents.get(session_key)
         if agent is _AGENT_PENDING_SENTINEL:
@@ -17341,24 +17354,58 @@ class GatewayRunner:
                 if observed_group_context:
                     _conversation_kwargs["persist_user_message"] = message
 
+                # === CLARIFY REPLY INTERCEPT ===
+                # If the user previously received a clarify prompt and
+                # replies with a number (0-3) or "new"/"новая", handle
+                # the selection at gateway level — do NOT send to agent.
+                _pending = _pending_clarify.pop(session_key, None) if session_key else None
+                if _pending is not None:
+                    _msg = message.strip()
+                    if _msg == "0":
+                        return {"final_response": "Остаёмся в текущей теме. Продолжай."}
+                    if _msg in ("новая", "new"):
+                        # Trigger /new via the built-in handler
+                        from hermes_state import SessionDB
+                        _db = SessionDB()
+                        _db.end_session(session_id, "new_command")
+                        return {"final_response": "Начинаю новую тему. О чём поговорим?"}
+                    if _msg.isdigit() and 1 <= int(_msg) <= len(_pending):
+                        idx = int(_msg) - 1
+                        target_sid = _pending[idx]["session_id"]
+                        title = _pending[idx].get("cluster_title", "прошлая тема")
+                        # Resume the target session
+                        from hermes_state import SessionDB
+                        _db = SessionDB()
+                        _db.end_session(session_id, "resume_command")
+                        # Update session title in agent context
+                        if hasattr(agent, "session_id"):
+                            try:
+                                agent.session_id = target_sid
+                            except Exception:
+                                pass
+                        return {"final_response": f"Переключилась на «{title}». Продолжаем."}
+                    # If the reply doesn't match any valid option,
+                    # treat it as a normal message (fall through).
+
                 # === RECALL ROUTER HOOK ===
                 _recall_result = _recall_route(message, agent)
                 if _recall_result is not None:
                     if isinstance(_recall_result, tuple) and _recall_result[0] == "clarify":
                         # Clarify zone (sim 0.5-0.7): ask the USER via platform,
-                        # NOT the agent via prompt injection. Build a candidate
-                        # list and return as a final_response dict.
+                        # NOT the agent via prompt injection.
                         candidates = _recall_result[1]
-                        lines = ["🤔 Clarification: possible topic matches\n"]
+                        lines = [
+                            "🤔 Уточнение — с чем связан твой вопрос?\n",
+                            "0. Остаться в текущей теме",
+                        ]
                         for i, c in enumerate(candidates[:3], 1):
-                            lines.append(
-                                f"{i}. {c['cluster_title']} "
-                                f"(sim={c['similarity']:.2f})"
-                            )
+                            sim_pct = f"{c['similarity']:.0%}"
+                            lines.append(f"{i}. {c['cluster_title']} (совпадение: {sim_pct})")
                         lines.append(
-                            "\nReply with the number or "
-                            "type «new» for a fresh session."
+                            "\nОтветь цифрой 0-3, или «новая» для отдельной темы."
                         )
+                        # Remember candidates so we can intercept the reply
+                        _pending_clarify[session_key] = candidates
                         # Return as dict so the caller (line 8084) can process
                         # this as a final_response without .get() error
                         return {"final_response": "\n".join(lines)}
