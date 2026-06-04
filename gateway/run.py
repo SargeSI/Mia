@@ -17378,7 +17378,10 @@ class GatewayRunner:
                     if _msg == "0":
                         # User chose "stay" — restore the original message
                         # that triggered clarify and let it through to agent.
-                        _orig_msg = _pending.get("_orig_message", "")
+                        # _pending is a list; _orig_message is in the last element.
+                        _orig_msg = ""
+                        if _pending and isinstance(_pending[-1], dict):
+                            _orig_msg = _pending[-1].get("_orig_message", "")
                         if _orig_msg:
                             message = _orig_msg
                             _api_run_message = _orig_msg
