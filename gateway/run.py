@@ -87,8 +87,22 @@ def _recall_route(user_message: str, agent):
             # Per recall spec: sim 0.5-0.7 → ask the USER, not the agent.
             # Return («clarify», candidates) tuple for the caller.
             clarify_candidates = store.search_clusters(emb, threshold=0.5, limit=3)
+            # Also search clusters of current session to show relevance
+            # of staying vs switching
+            current_clusters = store.get_clusters_with_embeddings(current_sid)
+            current_sim = 0.0
+            if current_clusters:
+                import numpy as _np
+                _q = _np.array(emb)
+                _sims = []
+                for cl in current_clusters:
+                    if cl.get("embedding"):
+                        _e = _np.array(cl["embedding"])
+                        _sims.append(float(1.0 - _np.dot(_q, _e) / (_np.linalg.norm(_q) * _np.linalg.norm(_e))))
+                if _sims:
+                    current_sim = max(_sims)
             store.close()
-            return ("clarify", clarify_candidates)
+            return ("clarify", clarify_candidates, current_sim)
         elif decision == "auto_switch":
             result = _build_recall_context([context], store, agent, label="RECALL")
             return result
@@ -17400,9 +17414,11 @@ class GatewayRunner:
                         # Clarify zone (sim 0.5-0.7): ask the USER via platform,
                         # NOT the agent via prompt injection.
                         candidates = _recall_result[1]
+                        current_sim = _recall_result[2] if len(_recall_result) > 2 else 0.0
+                        current_pct = f"{current_sim:.0%}"
                         lines = [
                             "🤔 Уточнение — с чем связан твой вопрос?\n",
-                            "0. Остаться в текущей теме",
+                            f"0. Остаться в текущей теме (совпадение: {current_pct})",
                         ]
                         for i, c in enumerate(candidates[:3], 1):
                             sim_pct = f"{c['similarity']:.0%}"
