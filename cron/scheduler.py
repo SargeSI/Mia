@@ -1512,10 +1512,15 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         except Exception:
             pass
 
-        # Reasoning config from config.yaml
+        # Reasoning config from config.yaml.
+        # For lightweight models (v4-flash), force thinking OFF regardless
+        # of global reasoning_effort — thinking is v4-pro-only and wastes
+        # tokens on simple cron tasks.
         from hermes_constants import parse_reasoning_effort
         effort = str(_cfg.get("agent", {}).get("reasoning_effort", "")).strip()
         reasoning_config = parse_reasoning_effort(effort)
+        if model and "flash" in model.lower():
+            reasoning_config = {"enabled": False}
 
         # Prefill messages from env or config.yaml
         prefill_messages = None

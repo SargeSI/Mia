@@ -71,6 +71,9 @@ def _annotate_incremental_cluster(cluster_texts: list[str]) -> tuple[str, str]:
                 ],
                 "temperature": 0.1,
                 "max_tokens": 256,
+                "extra_body": {
+                    "thinking": {"type": "disabled"},
+                },
             },
             headers={
                 "Authorization": "Bearer {}".format(DEEPSEEK_KEY),
