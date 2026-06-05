@@ -131,13 +131,20 @@ def is_diffuse(embedding, store, msg: str, threshold: float = 0.3, limit: int = 
     if top1_sim < 0.45:
         return False
 
-    # Если лучший кандидат имеет sim > 0.5 — тема определена,
+    # Если лучший кандидат имеет sim > 0.6 — тема определена,
     # не считаем размытым даже при маленьком разрыве
-    if top1_sim > 0.5:
+    if top1_sim > 0.6:
         return False
 
     # Адаптивный порог по длине сообщения
     length = len(msg)
+
+    # Long/mixed messages (>100 chars) with URLs/technical terms:
+    # embeddings are noisy because of mixed Russian/English/URL content.
+    # Trust top1_sim alone rather than dispersion — if the top cluster
+    # is above 0.35, the message has a clear theme even if top2 is close.
+    if length > 100:
+        return top1_sim < 0.35
 
     if length < 30:
         # Короткие сообщения — жёстче: нужен явный лидер
@@ -184,7 +191,7 @@ def decide(
         return ("skip", None)
 
     # Слой 3: штатный recall (полный search_clusters)
-    clusters = store.search_clusters(embedding, threshold=0.5, limit=10)
+    clusters = store.search_clusters(embedding, threshold=0.4, limit=10)
     candidates = [c for c in clusters if c["session_id"] != current_session_id]
 
     if not candidates:
@@ -195,7 +202,7 @@ def decide(
 
     if sim >= 0.7:
         return ("auto_switch", top)
-    elif sim >= 0.5:
+    elif sim >= 0.4:
         return ("clarify", top)
     else:
         return ("continue", None)
