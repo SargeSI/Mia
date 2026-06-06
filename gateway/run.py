@@ -17439,9 +17439,11 @@ class GatewayRunner:
                         # intercept the reply and restore context on "stay"
                         candidates.append({"_orig_message": message})
                         _pending_clarify[session_key] = candidates
-                        # Return as dict so the caller (line 8084) can process
-                        # this as a final_response without .get() error
-                        return {"final_response": "\n".join(lines)}
+                        # Don't return — let the message through to agent
+                        # AND show the clarify prompt. The gateway response
+                        # will be the clarify text, but the agent gets the
+                        # original message as its next turn.
+                        # Continue below to run_conversation.
                     else:
                         _conversation_kwargs["conversation_history"] = _recall_result
 
