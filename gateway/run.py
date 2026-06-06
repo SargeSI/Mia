@@ -17372,6 +17372,7 @@ class GatewayRunner:
                 # If the user previously received a clarify prompt and
                 # replies with a number (0-3) or "new"/"новая", handle
                 # the selection at gateway level — do NOT send to agent.
+                _skip_recall = False
                 _pending = _pending_clarify.pop(session_key, None) if session_key else None
                 if _pending is not None:
                     _msg = message.strip()
@@ -17385,7 +17386,9 @@ class GatewayRunner:
                         if _orig_msg:
                             message = _orig_msg
                             _api_run_message = _orig_msg
-                        # fall through to normal agent processing
+                        # Do NOT re-trigger _recall_route() — we already
+                        # decided to stay. The original message goes to agent.
+                        _skip_recall = True
                     elif _msg in ("новая", "new"):
                         # Trigger /new via the built-in handler
                         from hermes_state import SessionDB
@@ -17411,7 +17414,10 @@ class GatewayRunner:
                     # treat it as a normal message (fall through).
 
                 # === RECALL ROUTER HOOK ===
-                _recall_result = _recall_route(message, agent)
+                if _skip_recall:
+                    _recall_result = None
+                else:
+                    _recall_result = _recall_route(message, agent)
                 if _recall_result is not None:
                     if isinstance(_recall_result, tuple) and _recall_result[0] == "clarify":
                         # Clarify zone (sim 0.5-0.7): ask the USER via platform,
