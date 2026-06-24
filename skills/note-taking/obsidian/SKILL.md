@@ -12,11 +12,13 @@ Use this skill for filesystem-first Obsidian vault work: reading notes, listing 
 
 Use a known or resolved vault path before calling file tools.
 
-The documented vault-path convention is the `OBSIDIAN_VAULT_PATH` environment variable, for example from `~/.hermes/.env`. If it is unset, use `~/Documents/Obsidian Vault`.
+**Known vault for this user:** `/home/sarge/Second_Brain` (case-sensitive — `Second_Brain`, NOT `second_brain`). The vault lives under `/home/sarge/` which may require `sudo` for file operations — try without sudo first, but if you get `Permission denied`, use `sudo`. File tools (`read_file`, `search_files`, `write_file`, `patch`) don't support sudo — use `terminal` with `sudo cat` / `sudo find` for these cases.
+
+The documented vault-path convention is the `OBSIDIAN_VAULT_PATH` environment variable, for example from `~/.hermes/.env`. If it is unset, try the known path above first, then fall back to `~/Documents/Obsidian Vault`.
 
 File tools do not expand shell variables. Do not pass paths containing `$OBSIDIAN_VAULT_PATH` to `read_file`, `write_file`, `patch`, or `search_files`; resolve the vault path first and pass a concrete absolute path. Vault paths may contain spaces, which is another reason to prefer file tools over shell commands.
 
-If the vault path is unknown, `terminal` is acceptable for resolving `OBSIDIAN_VAULT_PATH` or checking whether the fallback path exists. Once the path is known, switch back to file tools.
+If the vault path is unknown, `terminal` is acceptable for resolving `OBSIDIAN_VAULT_PATH` or checking whether the fallback path exists. Once the path is known, switch back to file tools if possible (no sudo needed), or continue with `terminal` + `sudo` if the vault is under another user's home.
 
 ## Read a note
 

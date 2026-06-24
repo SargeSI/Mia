@@ -1,5 +1,6 @@
 ---
 name: dogfood
+created_by: "user"
 description: "Exploratory QA of web apps: find bugs, evidence, reports."
 version: 1.0.0
 platforms: [linux, macos, windows]

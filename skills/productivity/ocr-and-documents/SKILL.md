@@ -161,7 +161,34 @@ No extra dependencies needed — pymupdf covers split, merge, search, and text e
 
 ---
 
-## Notes
+## Image OCR (Tesseract Fallback)
+
+When `browser_vision` or any cloud vision API is unavailable (503, quota, auth issues), use local tesseract for plain image OCR. This is a lightweight fallback (~50MB install) that works offline.
+
+### Installation (one-time)
+
+```bash
+sudo apt-get install -y tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
+pip install pytesseract Pillow --break-system-packages
+```
+
+### Usage
+
+```python
+import pytesseract
+from PIL import Image
+
+img = Image.open('/path/to/image.jpg')
+text = pytesseract.image_to_string(img, lang='rus+eng')
+print(text)
+```
+
+### Pitfalls
+
+- **OCR quality depends heavily on image resolution.** Small/blurry screenshots produce garbled output. If the result is illegible, say so and ask for a clearer image.
+- **Mixed content (tables, forms, complex layouts)** — tesseract loses structure. Use marker-pdf for PDF scans, or ask the user to provide URL for web_extract.
+- **Language packs must be installed separately** — `tesseract-ocr-rus` for Russian, `tesseract-ocr-eng` for English.
+- **Do NOT use tesseract as the FIRST choice** — cloud vision (Gemini via browser_vision) is always preferred for screenshots. Tesseract is a FALLBACK when cloud is down.
 
 - `web_extract` is always first choice for URLs
 - pymupdf is the safe default — instant, no models, works everywhere
