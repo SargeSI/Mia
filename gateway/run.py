@@ -13190,8 +13190,8 @@ class GatewayRunner:
 
         def _list_titled_sessions() -> list[dict]:
             user_source = source.platform.value if source.platform else None
-            sessions = self._session_db.list_sessions_rich(source=user_source, limit=10)
-            return [s for s in sessions if s.get("title")][:10]
+            sessions = self._session_db.list_sessions_rich(source=user_source, limit=20)
+            return [s for s in sessions if s.get("title")][:20]
 
         if not name:
             # List recent titled sessions for this user/platform
@@ -17433,8 +17433,12 @@ class GatewayRunner:
                         # intercept the reply and restore context on "stay"
                         candidates.append({"_orig_message": message})
                         _pending_clarify[session_key] = candidates
-                        # Return as dict so the caller (line 8084) can process
-                        # this as a final_response without .get() error
+                        # Return clarify prompt to user immediately.
+                        # Do NOT call agent.run_conversation() — clarify is
+                        # a gateway dialog, not an agent response. The
+                        # original message reaches the agent only when the
+                        # user replies to clarify (via _pending_clarify
+                        # intercept above).
                         return {"final_response": "\n".join(lines)}
                     else:
                         _conversation_kwargs["conversation_history"] = _recall_result
