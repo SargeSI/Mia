@@ -17383,9 +17383,19 @@ class GatewayRunner:
                         if _pending and isinstance(_pending[-1], dict):
                             _orig_msg = _pending[-1].get("_orig_message", "")
                         if _orig_msg:
-                            message = _orig_msg
-                            _api_run_message = _orig_msg
-                        # fall through to normal agent processing
+                            # System note: user confirmed staying in current
+                            # session. The agent must NOT interpret recall
+                            # cluster titles as session context.
+                            _prefixed = (
+                                "[System note: The user chose to stay in the "
+                                "current session. Ignore any recall suggestions "
+                                "about other topics. This session IS the correct "
+                                "one for the conversation below.]\n\n"
+                                + _orig_msg
+                            )
+                            message = _prefixed
+                            _api_run_message = _prefixed
+                        _skip_recall = True
                     elif _msg in ("новая", "new"):
                         # Trigger /new via the built-in handler
                         from hermes_state import SessionDB
