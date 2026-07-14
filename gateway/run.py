@@ -17388,14 +17388,19 @@ class GatewayRunner:
                             # cluster titles as session context.
                             _prefixed = (
                                 "[System note: The user chose to stay in the "
-                                "current session. Ignore any recall suggestions "
-                                "about other topics. This session IS the correct "
-                                "one for the conversation below.]\n\n"
+                                "current session. Do NOT switch topics. Ignore "
+                                "any recall suggestions about other sessions. "
+                                "This session IS the correct one for the "
+                                "conversation below.]\n\n"
                                 + _orig_msg
                             )
                             message = _prefixed
                             _api_run_message = _prefixed
                         _skip_recall = True
+                        # Also skip persisting the user message for this
+                        # intercept turn — the original message was already
+                        # persisted when clarify fired. Don't double-persist.
+                        _conversation_kwargs.pop("persist_user_message", None)
                     elif _msg in ("новая", "new"):
                         # Trigger /new via the built-in handler
                         from hermes_state import SessionDB
