@@ -17472,13 +17472,14 @@ class GatewayRunner:
                         # intercept the reply and restore context on "stay"
                         candidates.append({"_orig_message": message})
                         _pending_clarify[session_key] = candidates
-                        # Return clarify prompt to user immediately.
-                        # Do NOT call agent.run_conversation() — clarify is
-                        # a gateway dialog, not an agent response. The
-                        # original message reaches the agent only when the
-                        # user replies to clarify (via _pending_clarify
-                        # intercept above).
-                        return {"final_response": "\n".join(lines)}
+                        # NEW: Don't reach agent with clarify text.
+                        # Instead, send clarify to user via final_response.
+                        # The agent will only receive the original message
+                        # when user replies to clarify.
+                        # 
+                        # Also skip calling _recall_route() and running
+                        # agent.conversation for this turn.
+                        return {"final_response": "\n".join(lines), "clarify_sent": True}
                     else:
                         _conversation_kwargs["conversation_history"] = _recall_result
 
