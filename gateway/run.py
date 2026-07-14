@@ -101,6 +101,13 @@ def _recall_route(user_message: str, agent):
                         _sims.append(float(1.0 - _np.dot(_q, _e) / (_np.linalg.norm(_q) * _np.linalg.norm(_e))))
                 if _sims:
                     current_sim = max(_sims)
+            # Also check clarify candidates: if a candidate is from the
+            # current session, use its (higher) similarity as current_sim.
+            # This catches the case where the W223 cluster was created in
+            # a different session but shares the topic with the current one.
+            for c in clarify_candidates:
+                if c["session_id"] == current_sid:
+                    current_sim = max(current_sim, c["similarity"])
             store.close()
             return ("clarify", clarify_candidates, current_sim)
         elif decision == "auto_switch":
@@ -17411,17 +17418,34 @@ class GatewayRunner:
                         idx = int(_msg) - 1
                         target_sid = _pending[idx]["session_id"]
                         title = _pending[idx].get("cluster_title", "прошлая тема")
-                        # Resume the target session
-                        from hermes_state import SessionDB
-                        _db = SessionDB()
-                        _db.end_session(session_id, "resume_command")
-                        # Update session title in agent context
-                        if hasattr(agent, "session_id"):
-                            try:
-                                agent.session_id = target_sid
-                            except Exception:
-                                pass
-                        return {"final_response": f"Переключилась на «{title}». Продолжаем."}
+                        # If target IS the current session — just restore
+                        # the original message and continue. Don't end_session.
+                        if target_sid == session_id:
+                            _orig_msg = _pending[-1].get("_orig_message", "") if _pending else ""
+                            if _orig_msg:
+                                _prefixed = (
+                                    "[System note: The user chose session "
+                                    "«" + title + "» which IS the current one. "
+                                    "Answer the question below in context of "
+                                    "this conversation.]\n\n" + _orig_msg
+                                )
+                                message = _prefixed
+                                _api_run_message = _prefixed
+                            _skip_recall = True
+                            _conversation_kwargs.pop("persist_user_message", None)
+                            # fall through to normal agent processing
+                        else:
+                            # Resume the target session
+                            from hermes_state import SessionDB
+                            _db = SessionDB()
+                            _db.end_session(session_id, "resume_command")
+                            # Update session title in agent context
+                            if hasattr(agent, "session_id"):
+                                try:
+                                    agent.session_id = target_sid
+                                except Exception:
+                                    pass
+                            return {"final_response": f"Переключилась на «{title}». Продолжаем."}
                     # If the reply doesn't match any valid option,
                     # treat it as a normal message (fall through).
 
