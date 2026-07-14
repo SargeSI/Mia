@@ -2028,6 +2028,11 @@ class GatewayRunner:
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
+        # One-shot per-session flag: skip recall routing on the next turn.
+        # Set when a user resolves a recall clarify by choosing to stay in
+        # the current session, so we don't re-fire clarify on the very
+        # message that triggered it (which would loop). Consumed in _run_agent.
+        self._clarify_skip_recall: set = set()
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
         # Overflow buffer for explicit /queue commands.  The adapter-level
         # _pending_messages dict is a single slot per session (designed for
@@ -7190,10 +7195,10 @@ class GatewayRunner:
         # we do NOT route it to the agent as a new turn.
         try:
             from tools import clarify_gateway as _clarify_mod
-            _pending_clarify = _clarify_mod.get_pending_for_session(_quick_key)
+            _tool_clarify_pending = _clarify_mod.get_pending_for_session(_quick_key)
         except Exception:
-            _pending_clarify = None
-        if _pending_clarify is not None:
+            _tool_clarify_pending = None
+        if _tool_clarify_pending is not None:
             _raw_clarify_reply = (event.text or "").strip()
             # Skip slash commands — the user clearly wanted to issue a
             # command, not answer the clarify.  Leave the clarify pending
@@ -7201,17 +7206,85 @@ class GatewayRunner:
             # with an empty response.
             if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
                 _resolved = _clarify_mod.resolve_gateway_clarify(
-                    _pending_clarify.clarify_id, _raw_clarify_reply,
+                    _tool_clarify_pending.clarify_id, _raw_clarify_reply,
                 )
                 if _resolved:
                     logger.info(
                         "Gateway intercepted clarify text response (session=%s, id=%s)",
-                        _quick_key, _pending_clarify.clarify_id,
+                        _quick_key, _tool_clarify_pending.clarify_id,
                     )
                     # Acknowledge with empty string so adapters that emit
                     # the agent's response don't double-post.  The agent
                     # itself will produce the next user-facing message.
                     return ""
+
+        # === RECALL CLARIFY REPLY INTERCEPT (two-phase protocol) ===
+        # If a recall clarify prompt is pending for this session, the
+        # user's reply (0-N / "новая") is resolved HERE at gateway level
+        # and never reaches the agent as a new turn.  The clarify FIRE
+        # turn is not persisted to the transcript, so:
+        #   • "0"  → stay: replay the original question against the (clean)
+        #            current session, skipping recall for this one turn.
+        #   • "N"  → if the chosen cluster is the current session, same as
+        #            stay; otherwise switch the session pointer.
+        #   • "новая"/"new" → end the session, start fresh.
+        #   • anything else → abandon the clarify, treat as a new message.
+        # This keeps the clarify dialog completely out of session history.
+        _clarify_pending = _pending_clarify.get(_quick_key)
+        if isinstance(_clarify_pending, dict):
+            _reply = (event.text or "").strip()
+            if _reply and not _reply.startswith("/"):
+                _cands = _clarify_pending.get("candidates", []) or []
+                _orig = _clarify_pending.get("orig", "") or ""
+                _cur_sid = _clarify_pending.get("current_sid")
+                _low = _reply.lower()
+                if _reply == "0":
+                    _pending_clarify.pop(_quick_key, None)
+                    self._mark_clarify_skip_recall(_quick_key)
+                    event.text = _orig
+                    # fall through to normal agent handling
+                elif _low in ("новая", "new"):
+                    _pending_clarify.pop(_quick_key, None)
+                    try:
+                        _cur = self.session_store.get_or_create_session(source)
+                        from hermes_state import SessionDB
+                        SessionDB().end_session(_cur.session_id, "new_command")
+                    except Exception as _e:
+                        logger.debug("clarify 'new' end_session failed: %s", _e)
+                    return "Начинаю новую тему. О чём поговорим?"
+                elif _reply.isdigit() and 1 <= int(_reply) <= len(_cands):
+                    _pending_clarify.pop(_quick_key, None)
+                    _target = _cands[int(_reply) - 1]
+                    _target_sid = _target.get("session_id")
+                    _title = _target.get("cluster_title", "прошлая тема")
+                    if _target_sid and _cur_sid and _target_sid == _cur_sid:
+                        # Chosen cluster belongs to the current session —
+                        # just answer the original question here.
+                        self._mark_clarify_skip_recall(_quick_key)
+                        event.text = _orig
+                        # fall through
+                    elif _target_sid:
+                        # Switch the session pointer to the target session
+                        # (mirrors _handle_resume_command's switch path).
+                        try:
+                            self._release_running_agent_state(_quick_key)
+                            _new = self.session_store.switch_session(_quick_key, _target_sid)
+                            self._clear_session_boundary_security_state(_quick_key)
+                            self._evict_cached_agent(_quick_key)
+                        except Exception as _e:
+                            logger.debug("clarify switch failed: %s", _e)
+                            _new = None
+                        if _new is None:
+                            return "Не смогла переключиться на выбранную тему."
+                        return f"Переключилась на «{_title}». Продолжаем."
+                    else:
+                        # No usable target id — treat as stay.
+                        self._mark_clarify_skip_recall(_quick_key)
+                        event.text = _orig
+                else:
+                    # Unrecognized reply — abandon the clarify and treat
+                    # the message as a brand-new turn.
+                    _pending_clarify.pop(_quick_key, None)
 
         # Intercept messages that are responses to a pending /reload-mcp
         # (or future) slash-confirm prompt.  Recognized confirm replies are
@@ -9226,6 +9299,13 @@ class GatewayRunner:
             # forgets what was just asked.  Persist the user turn so the
             # conversation is preserved. (#7100)
             agent_failed_early = bool(agent_result.get("failed"))
+            # Recall clarify FIRE turns are pure gateway dialog — the user
+            # asked a question, we replied with a topic-disambiguation prompt.
+            # Nothing about this turn belongs in the session transcript: the
+            # original question is held in _pending_clarify and replayed once
+            # the user resolves the clarify.  Persisting the clarify text here
+            # is exactly what poisoned the agent's context (BR-20260606-05).
+            _is_clarify_turn = bool(agent_result.get("clarify_sent"))
             _err_str_for_classify = str(agent_result.get("error", "")).lower()
             # Use specific multi-word phrases (not bare "exceed" or "token")
             # to avoid false positives on transient errors like "rate limit
@@ -9281,8 +9361,9 @@ class GatewayRunner:
             # If this is a fresh session (no history), write the full tool
             # definitions as the first entry so the transcript is self-describing
             # -- the same list of dicts sent as tools=[...] in the API request.
-            if is_context_overflow_failure:
+            if is_context_overflow_failure or _is_clarify_turn:
                 pass  # Skip all transcript writes — don't grow a broken session
+                      # (and never persist a recall clarify dialog turn).
             elif not history:
                 tool_defs = agent_result.get("tools", [])
                 self.session_store.append_to_transcript(
@@ -9300,7 +9381,7 @@ class GatewayRunner:
             # Use the filtered history length (history_offset) that was actually
             # passed to the agent, not len(history) which includes session_meta
             # entries that were stripped before the agent saw them.
-            if is_context_overflow_failure:
+            if is_context_overflow_failure or _is_clarify_turn:
                 pass  # handled above — skip all transcript writes
             elif agent_failed_early:
                 # Transient failure (429/timeout/5xx): persist only the user
@@ -15578,6 +15659,20 @@ class GatewayRunner:
         if release_running_state:
             self._release_running_agent_state(session_key)
 
+    def _mark_clarify_skip_recall(self, session_key: str) -> None:
+        """One-shot flag: skip recall routing on the next turn for this session.
+
+        Used after the user resolves a recall clarify by choosing to stay in
+        the current session — we replay the original question, but must NOT
+        re-run the recall router on it (it would re-fire the same clarify and
+        loop). Consumed exactly once in _run_agent.
+        """
+        if not session_key:
+            return
+        if not hasattr(self, "_clarify_skip_recall") or self._clarify_skip_recall is None:
+            self._clarify_skip_recall = set()
+        self._clarify_skip_recall.add(session_key)
+
     def _evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session (called on /new, /model, etc)."""
         _lock = getattr(self, "_agent_cache_lock", None)
@@ -17380,86 +17475,29 @@ class GatewayRunner:
                 if observed_group_context:
                     _conversation_kwargs["persist_user_message"] = message
 
-                # === CLARIFY REPLY INTERCEPT ===
-                # If the user previously received a clarify prompt and
-                # replies with a number (0-3) or "new"/"новая", handle
-                # the selection at gateway level — do NOT send to agent.
-                _pending = _pending_clarify.pop(session_key, None) if session_key else None
-                if _pending is not None:
-                    _msg = message.strip()
-                    if _msg == "0":
-                        # User chose "stay" — restore the original message
-                        # that triggered clarify and let it through to agent.
-                        # _pending is a list; _orig_message is in the last element.
-                        _orig_msg = ""
-                        if _pending and isinstance(_pending[-1], dict):
-                            _orig_msg = _pending[-1].get("_orig_message", "")
-                        if _orig_msg:
-                            # System note: user confirmed staying in current
-                            # session. The agent must NOT interpret recall
-                            # cluster titles as session context.
-                            _prefixed = (
-                                "[System note: The user chose to stay in the "
-                                "current session. Do NOT switch topics. Ignore "
-                                "any recall suggestions about other sessions. "
-                                "This session IS the correct one for the "
-                                "conversation below.]\n\n"
-                                + _orig_msg
-                            )
-                            message = _prefixed
-                            _api_run_message = _prefixed
-                        _skip_recall = True
-                        # Also skip persisting the user message for this
-                        # intercept turn — the original message was already
-                        # persisted when clarify fired. Don't double-persist.
-                        _conversation_kwargs.pop("persist_user_message", None)
-                    elif _msg in ("новая", "new"):
-                        # Trigger /new via the built-in handler
-                        from hermes_state import SessionDB
-                        _db = SessionDB()
-                        _db.end_session(session_id, "new_command")
-                        return {"final_response": "Начинаю новую тему. О чём поговорим?"}
-                    if _msg.isdigit() and 1 <= int(_msg) <= len(_pending):
-                        idx = int(_msg) - 1
-                        target_sid = _pending[idx]["session_id"]
-                        title = _pending[idx].get("cluster_title", "прошлая тема")
-                        # If target IS the current session — just restore
-                        # the original message and continue. Don't end_session.
-                        if target_sid == session_id:
-                            _orig_msg = _pending[-1].get("_orig_message", "") if _pending else ""
-                            if _orig_msg:
-                                _prefixed = (
-                                    "[System note: The user chose session "
-                                    "«" + title + "» which IS the current one. "
-                                    "Answer the question below in context of "
-                                    "this conversation.]\n\n" + _orig_msg
-                                )
-                                message = _prefixed
-                                _api_run_message = _prefixed
-                            _skip_recall = True
-                            _conversation_kwargs.pop("persist_user_message", None)
-                            # fall through to normal agent processing
-                        else:
-                            # Resume the target session
-                            from hermes_state import SessionDB
-                            _db = SessionDB()
-                            _db.end_session(session_id, "resume_command")
-                            # Update session title in agent context
-                            if hasattr(agent, "session_id"):
-                                try:
-                                    agent.session_id = target_sid
-                                except Exception:
-                                    pass
-                            return {"final_response": f"Переключилась на «{title}». Продолжаем."}
-                    # If the reply doesn't match any valid option,
-                    # treat it as a normal message (fall through).
-
                 # === RECALL ROUTER HOOK ===
-                _recall_result = _recall_route(message, agent)
+                # Clarify replies (0-N / "новая") are intercepted earlier in
+                # _handle_message and never reach here as new turns.  When the
+                # user chose to STAY in the current session, _handle_message
+                # sets a one-shot skip flag so we don't re-fire clarify on the
+                # very message that triggered it (which would loop forever).
+                _skip_recall_this_turn = False
+                try:
+                    _skip_set = getattr(self, "_clarify_skip_recall", None)
+                    if _skip_set is not None and session_key in _skip_set:
+                        _skip_set.discard(session_key)
+                        _skip_recall_this_turn = True
+                except Exception:
+                    _skip_recall_this_turn = False
+
+                _recall_result = None if _skip_recall_this_turn else _recall_route(message, agent)
                 if _recall_result is not None:
                     if isinstance(_recall_result, tuple) and _recall_result[0] == "clarify":
                         # Clarify zone (sim 0.5-0.7): ask the USER via platform,
-                        # NOT the agent via prompt injection.
+                        # NOT the agent via prompt injection.  The entire dialog
+                        # is resolved at gateway level (_handle_message) and this
+                        # FIRE turn is NOT persisted to the transcript, so the
+                        # agent never sees clarify text in its history.
                         candidates = _recall_result[1]
                         current_sim = _recall_result[2] if len(_recall_result) > 2 else 0.0
                         current_pct = f"{current_sim:.0%}"
@@ -17473,17 +17511,13 @@ class GatewayRunner:
                         lines.append(
                             "\nОтветь цифрой 0-3, или «новая» для отдельной темы."
                         )
-                        # Remember candidates + original message so we can
-                        # intercept the reply and restore context on "stay"
-                        candidates.append({"_orig_message": message})
-                        _pending_clarify[session_key] = candidates
-                        # NEW: Don't reach agent with clarify text.
-                        # Instead, send clarify to user via final_response.
-                        # The agent will only receive the original message
-                        # when user replies to clarify.
-                        # 
-                        # Also skip calling _recall_route() and running
-                        # agent.conversation for this turn.
+                        # Stash candidates + original message + current session
+                        # id so _handle_message can resolve the reply next turn.
+                        _pending_clarify[session_key] = {
+                            "candidates": candidates[:3],
+                            "orig": message,
+                            "current_sid": session_id,
+                        }
                         return {"final_response": "\n".join(lines), "clarify_sent": True}
                     else:
                         _conversation_kwargs["conversation_history"] = _recall_result
