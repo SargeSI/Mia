@@ -8108,12 +8108,17 @@ class GatewayRunner:
             # next turn makes more progress. Wrapped in try/except so a
             # broken judge never breaks normal message handling.
             try:
-                _final_text = ""
-                if isinstance(_agent_result, dict):
-                    _final_text = str(_agent_result.get("final_response") or "")
-                elif isinstance(_agent_result, str):
-                    _final_text = _agent_result
-                # Skip for empty responses (interrupted / errored) — the
+                # If clarify was just sent, skip goal continuation.
+                # Clarify is gateway dialog, not an agent response.
+                if isinstance(_agent_result, dict) and _agent_result.get("clarify_sent"):
+                    _final_text = ""
+                else:
+                    _final_text = ""
+                    if isinstance(_agent_result, dict):
+                        _final_text = str(_agent_result.get("final_response") or "")
+                    elif isinstance(_agent_result, str):
+                        _final_text = _agent_result
+                # Skip for empty responses (interrupted / errored, or clarify) — the
                 # judge would almost always say "continue" and we'd loop
                 # on error. Let the user drive the next turn.
                 if _final_text.strip():
